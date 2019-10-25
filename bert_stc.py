@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
-
 import os
-from time import time
-
+import time
 import numpy as np
+import pandas as pd
 import tensorflow as tf
+
+from sklearn.utils import shuffle
 from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
-from sklearn.utils import shuffle
-from tensorflow.python.keras.optimizers import SGD,Adam
+from bert_serving.client import BertClient
+from tensorflow.python.keras.optimizers import SGD
 
 import metrics
-from data_loader import load_data
 
 
 def autoencoder(dims, act=tf.nn.leaky_relu, init='glorot_uniform'):
@@ -118,9 +117,9 @@ class STC(object):
                           % (metrics.acc(self.y, y_pred), metrics.nmi(self.y, y_pred)))
 
         # begin pretraining
-        t0 = time()
+        t0 = time.time()
         self.autoencoder.fit(x, x, batch_size=batch_size, epochs=epochs)
-        print('Pretraining time: %ds' % round(time() - t0))
+        print('Pretraining time: %ds' % round(time.time() - t0))
         self.autoencoder.save_weights(save_dir + '/ae_weights.h5')
         print('Pretrained weights are saved to %s/ae_weights.h5' % save_dir)
         self.pretrained = True
@@ -193,6 +192,17 @@ class STC(object):
         return y_pred
 
 
+def load_data(data_dir):
+    bc = BertClient(port=5555, port_out=5556, check_length=False)
+    train_ay = pd.read_csv(data_dir + '/train.tsv', sep='\t', header=None).values
+    test_ay = pd.read_csv(data_dir + '/dev.tsv', sep='\t', header=None).values
+    data_ay = np.append(train_ay, test_ay, axis=0)
+
+    x = bc.encode(data_ay[:, 0].tolist())
+    y = data_ay[:, 1]
+
+    return x, y
+
 if __name__ == "__main__":
     # args
     ####################################################################################
@@ -200,80 +210,61 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='train',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--dataset', default='response_bert_stackoverflow')
+    parser.add_argument('--data_dir', default='/sdb/hugo/data/PublicSentiment/20190930')
 
-    parser.add_argument('--batch_size', default=128, type=int)
+    parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--maxiter', default=1500, type=int)
-    parser.add_argument('--pretrain_epochs', default=15, type=int)
+    parser.add_argument('--pretrain_epochs', default=50, type=int)
     parser.add_argument('--update_interval', default=30, type=int)
     parser.add_argument('--tol', default=0.0001, type=float)
-    parser.add_argument('--ae_weights', default='./data/stackoverflow/results/ae_weights.h5')
-    parser.add_argument('--save_dir', default='./data/stackoverflow/results/')
+    parser.add_argument('--ae_weights', default='./output/results/ae_weights.h5')
+    parser.add_argument('--save_dir', default='./output/results/')
     args = parser.parse_args()
 
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
-    if args.dataset == 'search_snippets':
-        args.update_interval = 100
-        args.maxiter = 100
-    elif args.dataset == 'stackoverflow':
-        args.update_interval = 500
-        args.maxiter = 1500
-        args.pretrain_epochs = 12
-    elif args.dataset == 'response_bert_stackoverflow':
-        args.update_interval = 500
-        args.maxiter = 1500
-        args.pretrain_epochs = 500
-    elif args.dataset == 'sip_bert_stackoverflow':
-        args.update_interval = 500
-        args.maxiter = 1500
-        args.pretrain_epochs = 12
-    elif args.dataset == 'biomedical':
-        args.update_interval = 300
-    else:
-        raise Exception("Dataset not found!")
+    # if args.dataset == 'search_snippets':
+    #     args.update_interval = 100
+    #     args.maxiter = 100
+    # elif args.dataset == 'stackoverflow':
+    #     args.update_interval = 500
+    #     args.maxiter = 1500
+    #     args.pretrain_epochs = 12
+    # elif args.dataset == 'biomedical':
+    #     args.update_interval = 300
+    # else:
+    #     raise Exception("Dataset not found!")
 
-
+    args.update_interval = 200
+    args.maxiter = 1500
+    args.pretrain_epochs = 12
 
     print(args)
 
     # load dataset
     ####################################################################################
-    x, y = load_data(args.dataset)
+    x, y = load_data(args.data_dir)
     n_clusters = len(np.unique(y))
 
-    X_test, X_dev, y_test, y_dev = train_test_split(x, y, test_size=0.1, random_state=0)
-    x, y = shuffle(X_test, y_test)
+    X_train, X_test, y_train, y_test = train_test_split(x, y, test_size=0.1, random_state=0)
+    x, y = shuffle(X_train, y_train)
 
     # create model
     ####################################################################################
-    # dec = STC(dims=[x.shape[-1], 500, 500, 2000, 20], n_clusters=n_clusters) # 0.011
-    # dec = STC(dims=[x.shape[-1], 1024, 1024, 4096, 36], n_clusters=n_clusters) # 0.0043
-    #dec = STC(dims=[x.shape[-1], 2048, 2048, 4096, 36], n_clusters=n_clusters) # 0.0016
-    # dec = STC(dims=[x.shape[-1], 2048, 4096, 4096, 36], n_clusters=n_clusters) # 0.0008
-    # dec = STC(dims=[x.shape[-1], 2048, 4096, 8192, 36], n_clusters=n_clusters) #X
-    if x.shape[-1] == 1024:
-        dec = STC(dims=[x.shape[-1], 2048, 4096, 4096, 20], n_clusters=n_clusters)
-    elif x.shape[-1] == 768:
-        dec = STC(dims=[x.shape[-1], 2048, 2048, 4096, 20], n_clusters=n_clusters)
-    else:
-        dec = STC(dims=[x.shape[-1], 500, 500, 2000, 20], n_clusters=n_clusters)
-
+    dec = STC(dims=[x.shape[-1], 500, 500, 2000, 30], n_clusters=n_clusters)
 
     # pretrain model
     ####################################################################################
-    optimizer = Adam(decay=1e-4)
-    # optimizer = SGD(lr=0.001)
     if not os.path.exists(args.ae_weights):
-        dec.pretrain(x=x, y=y, optimizer=optimizer,
+        dec.pretrain(x=x, y=y, optimizer='adam',
                      epochs=args.pretrain_epochs, batch_size=args.batch_size,
                      save_dir=args.save_dir)
     else:
         dec.autoencoder.load_weights(args.ae_weights)
 
     dec.model.summary()
-    t0 = time()
+    t0 = time.time()
     dec.compile(SGD(0.1, 0.9), loss='kld')
 
     # clustering

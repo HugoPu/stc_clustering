@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 
 import os
-from collections import Counter
-
 import nltk
 import numpy as np
 import scipy.io
+import pandas as pd
+
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.preprocessing import MinMaxScaler
+from collections import Counter
+
+import tokenization
+
+from bert_serving.client import BertClient
 
 
 def load_stackoverflow(data_path='data/stackoverflow/'):
@@ -38,6 +43,7 @@ def load_stackoverflow(data_path='data/stackoverflow/'):
 
     with open(data_path + 'title_StackOverflow.txt', 'r') as inp_txt:
         all_lines = inp_txt.readlines()[:-1]
+        # all_lines = inp_txt.readlines()
         text_file = " ".join([" ".join(nltk.word_tokenize(c)) for c in all_lines])
         word_count = Counter(text_file.split())
         total_count = sum(word_count.values())
@@ -230,6 +236,97 @@ def load_biomedical(data_path='data/Biomedical/'):
     return XX, y
 
 
+def sip_bert_stackoverflow(data_path='data/stackoverflow/'):
+    tokenizer = tokenization.FullTokenizer(
+        vocab_file='/sdb/hugo/wwm_uncased_L-24_H-1024_A-16/vocab.txt', do_lower_case='True')
+    bc = BertClient(port=5555, port_out=5556, check_length=False)
+    with open(data_path + 'title_StackOverflow.txt', 'r') as inp_txt:
+        # all_lines = inp_txt.readlines()[:-1]
+        all_lines = inp_txt.readlines()
+        all_lines = [line for line in all_lines]
+        all_lines_tokenization = [tokenizer.tokenize(line) for line in all_lines]
+        text_file = " ".join([" ".join(line) for line in all_lines_tokenization])
+        word_count = Counter(text_file.split())
+        total_count = sum(word_count.values())
+        unigram = {}
+        for item in word_count.items():
+            unigram[item[0]] = item[1] / total_count
+
+        all_lines_embedding = bc.encode(all_lines)
+        all_vector_representation = np.zeros([len(all_lines), 1024])
+
+        for i, token_sentence in enumerate(all_lines_tokenization):
+            embedding_sentence = all_lines_embedding[i][1:]
+            assert len(embedding_sentence) >= len(token_sentence)
+
+            j = 0
+            sent_rep = None
+            for k, token in enumerate(token_sentence):
+                tv = embedding_sentence[k]
+                j = k
+                weight = 0.1 / (0.1 + unigram[token])
+                if k == 0:
+                    sent_rep = tv * weight
+                else:
+                    sent_rep += tv * weight
+            if j != 0:
+                all_vector_representation[i] = sent_rep / j
+            else:
+                all_vector_representation[i] = sent_rep
+
+    svd = TruncatedSVD(n_components=1, n_iter=20)
+    svd.fit(all_vector_representation)
+    svd = svd.components_
+
+    XX = all_vector_representation - all_vector_representation.dot(svd.transpose()) * svd
+
+    scaler = MinMaxScaler()
+    XX = scaler.fit_transform(XX)
+
+    with open(data_path + 'label_StackOverflow.txt') as label_file:
+        y = np.array(list((map(int, label_file.readlines()))))
+
+    return XX, y
+
+def response_bert_stackoverflow(data_path='data/stackoverflow/'):
+    bc = BertClient(port=5555, port_out=5556, check_length=False)
+    with open(data_path + 'title_StackOverflow.txt', 'r') as inp_txt:
+        # all_lines = inp_txt.readlines()[:-1]
+        all_lines = inp_txt.readlines()
+        XX = bc.encode(all_lines)
+
+    with open(data_path + 'label_StackOverflow.txt') as label_file:
+        y = np.array(list((map(int, label_file.readlines()))))
+
+    return XX, y
+
+def generate_tsv(data_path='data/stackoverflow/'):
+    DATA_DIR = '/sdb/hugo/data/PublicSentiment/stackflow'
+    with open(data_path + 'title_StackOverflow.txt', 'r') as inp_txt:
+        # all_lines = inp_txt.readlines()[:-1]
+        all_lines = inp_txt.readlines()
+        all_lines = [' '.join(line.split()) for line in all_lines]
+
+    with open(data_path + 'label_StackOverflow.txt') as label_file:
+        y = np.array(list((map(int, label_file.readlines())))).astype(int) - 1
+
+    data = np.column_stack((all_lines, y))
+
+    total_count = len(data)
+    print('Total:%s' % (total_count))
+    data_pd = pd.DataFrame(data)
+    data_pd = data_pd.take(np.random.permutation(total_count))
+
+    train_pd = data_pd[: int(total_count * 0.8)]
+    dev_pd = data_pd[int(total_count * 0.8):]
+    # dev_pd = data_pd[int(total_count * 0.8): int(total_count * 0.9)]
+    # test_pd = data_pd[int(total_count * 0.9):]
+
+    train_pd.to_csv(DATA_DIR + '/train.tsv', sep='\t', header=None, index=False)
+    dev_pd.to_csv(DATA_DIR + '/dev.tsv', sep='\t', header=None, index=False)
+    dev_pd.to_csv(DATA_DIR + '/test.tsv', sep='\t', header=None, index=False)
+
+
 def load_data(dataset_name):
     print('load data')
     if dataset_name == 'stackoverflow':
@@ -238,5 +335,13 @@ def load_data(dataset_name):
         return load_biomedical()
     elif dataset_name == 'search_snippets':
         return load_search_snippet2()
+    elif dataset_name == 'sip_bert_stackoverflow':
+        return sip_bert_stackoverflow()
+    elif dataset_name == 'response_bert_stackoverflow':
+        return response_bert_stackoverflow()
     else:
         raise Exception('dataset not found...')
+
+if __name__ == '__main__':
+    load_data('response_bert_stackoverflow')
+    # generate_tsv()
